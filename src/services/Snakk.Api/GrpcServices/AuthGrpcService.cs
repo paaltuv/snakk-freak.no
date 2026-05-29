@@ -590,7 +590,11 @@ public class AuthGrpcService(
         GenerateDiscordLinkTokenRequest request, ServerCallContext ctx)
     {
         var userId = RequireAuth();
-        var user = await context.Users.FirstOrDefaultAsync(u => u.PublicId == userId.Value);
+        // AsTracking() so the DiscordLinkToken / DiscordLinkTokenExpiry assignments
+        // below actually persist. Without this the whole Discord link flow was dead:
+        // GenerateDiscordLinkToken returned a token never written to the DB, so
+        // CompleteDiscordLink's lookup by that token always failed (CR-25).
+        var user = await context.Users.AsTracking().FirstOrDefaultAsync(u => u.PublicId == userId.Value);
         if (user is null) throw new RpcException(new Status(StatusCode.NotFound, "User not found"));
 
         var token = Guid.NewGuid().ToString("N");
@@ -609,7 +613,12 @@ public class AuthGrpcService(
     public override async Task<CompleteDiscordLinkResponse> CompleteDiscordLink(
         CompleteDiscordLinkRequest request, ServerCallContext ctx)
     {
-        var user = await context.Users.FirstOrDefaultAsync(u =>
+        // AsTracking() so the Discord-field assignments and the link-token clearing
+        // at lines 613-617 actually persist (CR-25). Without it, the link would
+        // appear to succeed but the row would be unchanged, AND the link token
+        // would remain valid until DiscordLinkTokenExpiry — letting any party that
+        // intercepted the token claim the same victim's Discord linkage repeatedly.
+        var user = await context.Users.AsTracking().FirstOrDefaultAsync(u =>
             u.DiscordLinkToken == request.LinkToken &&
             u.DiscordLinkTokenExpiry != null &&
             u.DiscordLinkTokenExpiry > DateTime.UtcNow);
@@ -637,7 +646,10 @@ public class AuthGrpcService(
         UnlinkDiscordRequest request, ServerCallContext ctx)
     {
         var userId = RequireAuth();
-        var user = await context.Users.FirstOrDefaultAsync(u => u.PublicId == userId.Value);
+        // AsTracking() so the field nulling below actually persists. Pre-fix the
+        // user got a success response but the Discord linkage row was unchanged —
+        // so "Unlink Discord" was UX-only (CR-25).
+        var user = await context.Users.AsTracking().FirstOrDefaultAsync(u => u.PublicId == userId.Value);
         if (user is null) throw new RpcException(new Status(StatusCode.NotFound, "User not found"));
 
         user.DiscordUserId = null;
@@ -746,10 +758,16 @@ public class AuthGrpcService(
     public override async Task<ConnectOAuthProviderResponse> ConnectOAuthProvider(
         ConnectOAuthProviderRequest request, ServerCallContext ctx)
     {
-        // Server-to-server (Snakk.Auth) passes user_public_id explicitly; BFF callers use JWT
-        var userPublicId = request.HasUserPublicId
-            ? request.UserPublicId
-            : RequireAuth().Value;
+        // Identity is taken from the authenticated JWT only. The previous code path
+        // honored a client-supplied request.UserPublicId when set, with the comment
+        // that Snakk.Auth was a trusted server-to-server caller — but no
+        // service-to-service auth gated the bypass, so any caller reaching the
+        // gRPC surface could spoof the user. Snakk.Auth now forwards the validated
+        // JWT cookie as a Bearer header instead. (CR-21 / HI-60 in
+        // docs/SECURITY-AUDIT-2026-05-23.md.) The request.UserPublicId proto field
+        // is left in place for wire-compat with older clients but the value is
+        // ignored.
+        var userPublicId = RequireAuth().Value;
 
         var result = await authUseCase.ConnectOAuthProviderAsync(
             userPublicId, request.Provider, request.ProviderUserId, ctx.CancellationToken);
@@ -795,10 +813,14 @@ public class AuthGrpcService(
     public override async Task<GenerateOAuthSudoNonceResponse> GenerateOAuthSudoNonce(
         GenerateOAuthSudoNonceRequest request, ServerCallContext ctx)
     {
+        // As in ConnectOAuthProvider, identity must come from the authenticated JWT,
+        // not from request.UserPublicId — see comment there.
+        var userPublicId = RequireAuth().Value;
+
         // Verify the provider+providerUserId matches a connection for this user
         var connection = await context.UserOAuthConnections
             .FirstOrDefaultAsync(c =>
-                c.User.PublicId == request.UserPublicId &&
+                c.User.PublicId == userPublicId &&
                 c.Provider == request.Provider &&
                 c.ProviderUserId == request.ProviderUserId,
                 ctx.CancellationToken);
@@ -807,7 +829,7 @@ public class AuthGrpcService(
             throw new RpcException(new Status(StatusCode.PermissionDenied, "OAuth connection not found for user"));
 
         var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-        var cacheKey = $"sudo-oauth-nonce:{request.UserPublicId}:{nonce}";
+        var cacheKey = $"sudo-oauth-nonce:{userPublicId}:{nonce}";
         cache.Set(cacheKey, true, TimeSpan.FromSeconds(60));
 
         return new GenerateOAuthSudoNonceResponse { Nonce = nonce };
