@@ -101,6 +101,7 @@ builder.Services.AddHttpLogging(options =>
         | Microsoft.AspNetCore.HttpLogging.HttpLoggingFields.ResponseStatusCode
         | Microsoft.AspNetCore.HttpLogging.HttpLoggingFields.Duration;
 });
+builder.Services.AddHttpLoggingInterceptor<Snakk.Web.Middleware.StaticFileLoggingInterceptor>();
 
 // Add services to the container
 builder.Services.AddRazorPages(options =>

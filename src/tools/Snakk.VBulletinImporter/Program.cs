@@ -32,7 +32,7 @@ var vbUsers = await reader.ReadUsersAsync();
 Console.WriteLine($"  Read {vbUsers.Count:N0} users from MySQL ({sw.Elapsed.TotalSeconds:F1}s)");
 
 sw.Restart();
-var userMapping = await writer.WriteUsersAsync(vbUsers);
+var (userMapping, userPublicIds) = await writer.WriteUsersAsync(vbUsers);
 Console.WriteLine($"  Wrote {userMapping.Count:N0} users to PostgreSQL ({sw.Elapsed.TotalSeconds:F1}s)\n");
 
 // ─── Step 3: User Avatars ────────────────────────────────────────────────────
@@ -70,13 +70,13 @@ var categories = vbForums.Where(f => f.ParentId == -1).OrderBy(f => f.DisplayOrd
 Console.WriteLine($"  Found {categories.Count} categories → hubs, {vbForums.Count(f => f.ParentId != -1)} forums → spaces");
 
 sw.Restart();
-var hubMapping = await writer.WriteHubsAsync(categories, communityId);
+var (hubMapping, hubPublicIds) = await writer.WriteHubsAsync(categories, communityId);
 Console.WriteLine($"  Wrote {hubMapping.Count} hubs ({sw.Elapsed.TotalSeconds:F1}s)\n");
 
 // ─── Step 7: Spaces (vBulletin forums, with sub-forum flattening) ────────────
 Console.WriteLine("[7/15] Importing spaces (vBulletin forums)...");
 sw.Restart();
-var (spaceMapping, spaceToHub) = await writer.WriteSpacesAsync(vbForums, hubMapping);
+var (spaceMapping, spaceToHub, spacePublicIds) = await writer.WriteSpacesAsync(vbForums, hubMapping);
 Console.WriteLine($"  Wrote {spaceMapping.Count} spaces ({sw.Elapsed.TotalSeconds:F1}s)\n");
 
 // ─── Step 8: Discussions (vBulletin threads) ─────────────────────────────────
@@ -88,7 +88,7 @@ Console.WriteLine($"  Read {vbThreads.Count:N0} threads from MySQL ({sw.Elapsed.
 var firstPostIds = new HashSet<int>(vbThreads.Where(t => t.FirstPostId > 0).Select(t => t.FirstPostId));
 
 sw.Restart();
-var discussionMapping = await writer.WriteDiscussionsAsync(vbThreads, spaceMapping, spaceToHub, communityId, userMapping);
+var (discussionMapping, discussionPublicIds) = await writer.WriteDiscussionsAsync(vbThreads, spaceMapping, spaceToHub, communityId, userMapping);
 Console.WriteLine($"  Wrote {discussionMapping.Count:N0} discussions ({sw.Elapsed.TotalSeconds:F1}s)\n");
 
 // ─── Step 9: Discussion Type Extensions (links + polls) ──────────────────────
@@ -125,7 +125,8 @@ var batchNum = 0;
 await foreach (var batch in reader.ReadPostsBatchedAsync(10_000))
 {
     batchNum++;
-    var batchMap = await writer.WritePostBatchAsync(batch, discussionMapping, userMapping, firstPostIds);
+    var batchMap = await writer.WritePostBatchAsync(batch, discussionMapping, discussionPublicIds,
+        spacePublicIds, hubPublicIds, communityPublicId, userMapping, userPublicIds, firstPostIds);
     foreach (var kvp in batchMap) postMapping[kvp.Key] = kvp.Value;
     totalPosts += batch.Count;
     Console.Write($"\r  Progress: {totalPosts:N0} posts ({batchNum} batches, {sw.Elapsed.TotalSeconds:F0}s)");

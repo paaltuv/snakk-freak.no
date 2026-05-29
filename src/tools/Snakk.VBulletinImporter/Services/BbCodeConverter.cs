@@ -14,6 +14,10 @@ public static partial class BbCodeConverter
         if (string.IsNullOrEmpty(bbcode))
             return string.Empty;
 
+        // Drop lone surrogates — vBulletin MySQL data occasionally contains unpaired
+        // UTF-16 surrogates that cannot be encoded as valid UTF-8 for PostgreSQL.
+        bbcode = string.Concat(bbcode.EnumerateRunes().Where(r => r.Value != 0xFFFD).Select(r => r.ToString()));
+
         var text = bbcode;
 
         // Normalize line endings

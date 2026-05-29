@@ -147,9 +147,11 @@ public partial class SnakkWriter(string connectionString)
     /// Bulk-inserts users via COPY (placeholder emails for mapping), then updates with real emails.
     /// Returns mapping: vBulletin userid → Snakk User.Id
     /// </summary>
-    public async Task<Dictionary<int, int>> WriteUsersAsync(List<VBUser> users)
+    public async Task<(Dictionary<int, int> VbToId, Dictionary<int, string> SnakkIdToPublicId)> WriteUsersAsync(List<VBUser> users)
     {
         var mapping = new Dictionary<int, int>(users.Count);
+        var publicIdMap = new Dictionary<int, string>(users.Count); // snakkUserId → publicId
+        var userUlids = users.ToDictionary(u => u.UserId, _ => NewUlid()); // pre-generate so we can track them
         var importTime = DateTime.UtcNow;
 
         await using var conn = new NpgsqlConnection(connectionString);
@@ -174,7 +176,7 @@ public partial class SnakkWriter(string connectionString)
                 var placeholderEmail = $"{u.UserId}@imported.freakforum.nu";
 
                 await writer.StartRowAsync();
-                await writer.WriteAsync(NewUlid(), NpgsqlDbType.Text);                              // PublicId
+                await writer.WriteAsync(userUlids[u.UserId], NpgsqlDbType.Text);                    // PublicId
                 await writer.WriteAsync(u.Username.Trim(), NpgsqlDbType.Text);                      // DisplayName
                 await writer.WriteAsync(placeholderEmail, NpgsqlDbType.Text);                       // Email (placeholder)
                 await writer.WriteNullAsync();                                                       // PasswordHash (null — use legacy)
@@ -230,7 +232,11 @@ public partial class SnakkWriter(string connectionString)
                 var email = mapReader.GetString(1);
                 var at = email.IndexOf('@');
                 if (at > 0 && int.TryParse(email[..at], out var vbId))
+                {
                     mapping[vbId] = snakkId;
+                    if (userUlids.TryGetValue(vbId, out var pid))
+                        publicIdMap[snakkId] = pid;
+                }
             }
         }
 
@@ -263,7 +269,7 @@ public partial class SnakkWriter(string connectionString)
             await ExecuteNonQuery(conn, @"DROP TABLE _email_upd");
         }
 
-        return mapping;
+        return (mapping, publicIdMap);
     }
 
     // ─── User Roles ───────────────────────────────────────────────────────────
@@ -327,9 +333,10 @@ public partial class SnakkWriter(string connectionString)
 
     // ─── Hubs ─────────────────────────────────────────────────────────────────
 
-    public async Task<Dictionary<int, int>> WriteHubsAsync(List<VBForum> categories, int communityId)
+    public async Task<(Dictionary<int, int> VbToId, Dictionary<int, string> SnakkIdToPublicId)> WriteHubsAsync(List<VBForum> categories, int communityId)
     {
         var mapping = new Dictionary<int, int>(categories.Count);
+        var publicIdMap = new Dictionary<int, string>(categories.Count); // snakkHubId → publicId
         var slugs = new HashSet<string>();
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
@@ -349,18 +356,21 @@ public partial class SnakkWriter(string connectionString)
         foreach (var cat in categories)
         {
             var slug = SlugGenerator.GenerateUnique(cat.Title, slugs);
+            var pid = NewUlid();
             await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("pid", NewUlid());
+            cmd.Parameters.AddWithValue("pid", pid);
             cmd.Parameters.AddWithValue("slug", slug);
             cmd.Parameters.AddWithValue("cid", communityId);
             cmd.Parameters.AddWithValue("cpid", communityPublicId);
             cmd.Parameters.AddWithValue("name", cat.Title);
             cmd.Parameters.AddWithValue("desc", (object?)cat.Description ?? DBNull.Value);
             cmd.Parameters.AddWithValue("created", DateTime.UtcNow);
-            mapping[cat.ForumId] = (int)(await cmd.ExecuteScalarAsync())!;
+            var snakkId = (int)(await cmd.ExecuteScalarAsync())!;
+            mapping[cat.ForumId] = snakkId;
+            publicIdMap[snakkId] = pid;
         }
 
-        return mapping;
+        return (mapping, publicIdMap);
     }
 
     // ─── Spaces ───────────────────────────────────────────────────────────────
@@ -369,11 +379,12 @@ public partial class SnakkWriter(string connectionString)
     /// Writes spaces (forums). Flattens sub-forums under their grandparent hub.
     /// Returns (vbForumId→snakkSpaceId, snakkSpaceId→snakkHubId).
     /// </summary>
-    public async Task<(Dictionary<int, int> VbToSnakk, Dictionary<int, int> SnakkToHub)> WriteSpacesAsync(
+    public async Task<(Dictionary<int, int> VbToSnakk, Dictionary<int, int> SnakkToHub, Dictionary<int, string> SnakkIdToPublicId)> WriteSpacesAsync(
         List<VBForum> allForums, Dictionary<int, int> hubMapping)
     {
         var vbToSnakk = new Dictionary<int, int>();
         var snakkToHub = new Dictionary<int, int>();
+        var publicIdMap = new Dictionary<int, string>(); // snakkSpaceId → publicId
         var slugs = new HashSet<string>();
 
         var forumById = allForums.ToDictionary(f => f.ForumId);
@@ -440,8 +451,9 @@ public partial class SnakkWriter(string connectionString)
             }
 
             var slug = SlugGenerator.GenerateUnique(forum.Title, slugs);
+            var pid = NewUlid();
             await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("pid", NewUlid());
+            cmd.Parameters.AddWithValue("pid", pid);
             cmd.Parameters.AddWithValue("slug", slug);
             cmd.Parameters.AddWithValue("hid", hubId);
             cmd.Parameters.AddWithValue("name", forum.Title);
@@ -458,14 +470,15 @@ public partial class SnakkWriter(string connectionString)
             var spaceId = (int)(await cmd.ExecuteScalarAsync())!;
             vbToSnakk[forum.ForumId] = spaceId;
             snakkToHub[spaceId] = hubId;
+            publicIdMap[spaceId] = pid;
         }
 
-        return (vbToSnakk, snakkToHub);
+        return (vbToSnakk, snakkToHub, publicIdMap);
     }
 
     // ─── Discussions ──────────────────────────────────────────────────────────
 
-    public async Task<Dictionary<int, (int SnakkId, int SpaceId, int HubId, int CommunityId)>> WriteDiscussionsAsync(
+    public async Task<(Dictionary<int, (int SnakkId, int SpaceId, int HubId, int CommunityId)> VbToMeta, Dictionary<int, string> SnakkIdToPublicId)> WriteDiscussionsAsync(
         List<VBThread> threads,
         Dictionary<int, int> spaceMapping,
         Dictionary<int, int> spaceToHub,
@@ -473,6 +486,7 @@ public partial class SnakkWriter(string connectionString)
         Dictionary<int, int> userMapping)
     {
         var mapping = new Dictionary<int, (int, int, int, int)>();
+        var publicIdMap = new Dictionary<int, string>(); // snakkDiscussionId → publicId
         var slugs = new HashSet<string>();
 
         var valid = new List<(VBThread T, string PublicId, string Slug, int SpaceId, int HubId, int UserId)>();
@@ -546,10 +560,13 @@ public partial class SnakkWriter(string connectionString)
             var snakkId = reader.GetInt32(0);
             var publicId = reader.GetString(1);
             if (publicIdToVbId.TryGetValue(publicId, out var vbId) && publicIdToMeta.TryGetValue(publicId, out var meta))
+            {
                 mapping[vbId] = (snakkId, meta.SpaceId, meta.HubId, communityId);
+                publicIdMap[snakkId] = publicId;
+            }
         }
 
-        return mapping;
+        return (mapping, publicIdMap);
     }
 
     // ─── Discussion Type Extensions ───────────────────────────────────────────
@@ -657,7 +674,12 @@ public partial class SnakkWriter(string connectionString)
     public async Task<Dictionary<int, int>> WritePostBatchAsync(
         List<VBPost> posts,
         Dictionary<int, (int SnakkId, int SpaceId, int HubId, int CommunityId)> discussionMapping,
+        Dictionary<int, string> discussionPublicIds,
+        Dictionary<int, string> spacePublicIds,
+        Dictionary<int, string> hubPublicIds,
+        string communityPublicId,
         Dictionary<int, int> userMapping,
+        Dictionary<int, string> userPublicIds,
         HashSet<int> firstPostIds)
     {
         var mapping = new Dictionary<int, int>(posts.Count);
@@ -684,8 +706,12 @@ public partial class SnakkWriter(string connectionString)
                                            ""IsFirstPost"", ""HasCodeBlock"", ""RevisionCount"", ""ReactionCount"",
                                            ""IsUsersFirstPostInDiscussion"", ""IsUsersFirstPostInSpace"",
                                            ""IsOp"", ""IsNecro"", ""IsMilestone"", ""WasNormalized"",
-                                           ""DiscussionId"", ""SpaceId"", ""HubId"", ""CommunityId"",
-                                           ""CreatedByUserId"", ""PlainTextExcerpt"")
+                                           ""DiscussionId"", ""DiscussionPublicId"",
+                                           ""SpaceId"", ""SpacePublicId"",
+                                           ""HubId"", ""HubPublicId"",
+                                           ""CommunityId"", ""CommunityPublicId"",
+                                           ""CreatedByUserId"", ""CreatedByUserPublicId"",
+                                           ""PlainTextExcerpt"")
                             FROM STDIN (FORMAT BINARY)";
             await using var writer = await conn.BeginBinaryImportAsync(copySql);
 
@@ -696,10 +722,10 @@ public partial class SnakkWriter(string connectionString)
                 var isFirst = firstPostIds.Contains(p.PostId);
 
                 var normalized = contentNormalizer.NormalizeBody(BbCodeConverter.Convert(p.PageText));
-                var content = normalized.Content;
-                var renderedContent = markupParser.ToHtml(content, autoParagraph: true, imageData: null);
+                var content = StripLoneSurrogates(normalized.Content);
+                var renderedContent = StripLoneSurrogates(markupParser.ToHtml(content, autoParagraph: true, imageData: null));
                 var plainText = markupParser.ToPlainText(content);
-                var excerpt = plainText.Length > 200 ? plainText[..200] : plainText;
+                var excerpt = StripLoneSurrogates(plainText.Length > 200 ? plainText[..200] : plainText);
 
                 await writer.StartRowAsync();
                 await writer.WriteAsync(publicId, NpgsqlDbType.Text);
@@ -722,10 +748,15 @@ public partial class SnakkWriter(string connectionString)
                 await writer.WriteAsync(false, NpgsqlDbType.Boolean);
                 await writer.WriteAsync(normalized.WasNormalized, NpgsqlDbType.Boolean);
                 await writer.WriteAsync(discussionId, NpgsqlDbType.Integer);
+                await writer.WriteAsync(discussionPublicIds.GetValueOrDefault(discussionId, ""), NpgsqlDbType.Text);
                 await writer.WriteAsync(spaceId, NpgsqlDbType.Integer);
+                await writer.WriteAsync(spacePublicIds.GetValueOrDefault(spaceId, ""), NpgsqlDbType.Text);
                 await writer.WriteAsync(hubId, NpgsqlDbType.Integer);
+                await writer.WriteAsync(hubPublicIds.GetValueOrDefault(hubId, ""), NpgsqlDbType.Text);
                 await writer.WriteAsync(communityId, NpgsqlDbType.Integer);
+                await writer.WriteAsync(communityPublicId, NpgsqlDbType.Text);
                 await writer.WriteAsync(userId, NpgsqlDbType.Integer);
+                await writer.WriteAsync(userPublicIds.GetValueOrDefault(userId, ""), NpgsqlDbType.Text);
                 if (!string.IsNullOrEmpty(excerpt)) await writer.WriteAsync(excerpt, NpgsqlDbType.Text);
                 else await writer.WriteNullAsync();
             }
@@ -903,7 +934,7 @@ public partial class SnakkWriter(string connectionString)
             WHERE d.""Id"" = lp.""DiscussionId""");
 
         Console.WriteLine("  Discussion breadcrumb + author fields...");
-        await ExecuteNonQuery(conn, @"
+        await ExecuteNonQueryBatchedAsync(conn, @"
             UPDATE ""Discussion"" d
             SET ""SpacePublicId""                 = s.""PublicId"",
                 ""HubPublicId""                   = h.""PublicId"",
@@ -916,10 +947,13 @@ public partial class SnakkWriter(string connectionString)
             WHERE d.""SpaceId"" = s.""Id""
               AND s.""HubId"" = h.""Id""
               AND h.""CommunityId"" = c.""Id""
-              AND d.""CreatedByUserId"" = u.""Id""");
+              AND d.""CreatedByUserId"" = u.""Id""
+              AND d.""SpacePublicId"" IS NULL
+              AND d.""Id"" >= @s AND d.""Id"" < @e",
+            "Discussion");
 
         Console.WriteLine("  Post breadcrumb PublicId fields...");
-        await ExecuteNonQuery(conn, @"
+        await ExecuteNonQueryBatchedAsync(conn, @"
             UPDATE ""Post"" p
             SET ""DiscussionPublicId""       = d.""PublicId"",
                 ""SpacePublicId""            = s.""PublicId"",
@@ -931,7 +965,10 @@ public partial class SnakkWriter(string connectionString)
               AND d.""SpaceId"" = s.""Id""
               AND s.""HubId"" = h.""Id""
               AND h.""CommunityId"" = c.""Id""
-              AND p.""CreatedByUserId"" = u.""Id""");
+              AND p.""CreatedByUserId"" = u.""Id""
+              AND p.""DiscussionPublicId"" IS NULL
+              AND p.""Id"" >= @s AND p.""Id"" < @e",
+            "Post");
 
         Console.WriteLine("  Space counts...");
         await ExecuteNonQuery(conn, @"UPDATE ""Space"" s SET ""DiscussionCount"" = COALESCE(sub.cnt, 0)
@@ -1046,11 +1083,54 @@ public partial class SnakkWriter(string connectionString)
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Removes lone UTF-16 surrogates that cannot be encoded as valid UTF-8.
+    /// Valid surrogate pairs (emoji etc.) pass through unchanged.
+    /// </summary>
+    private static string StripLoneSurrogates(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        // EnumerateRunes replaces lone surrogates with U+FFFD; we filter those out.
+        return string.Concat(s.EnumerateRunes().Where(r => r.Value != 0xFFFD).Select(r => r.ToString()));
+    }
+
     private static async Task ExecuteNonQuery(NpgsqlConnection conn, string sql)
     {
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.CommandTimeout = 900;
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Executes an UPDATE in 100K-row ID-range batches.
+    /// The SQL must include <c>AND t."Id" >= @s AND t."Id" &lt; @e</c> in its WHERE clause.
+    /// </summary>
+    private static async Task ExecuteNonQueryBatchedAsync(
+        NpgsqlConnection conn, string sql, string table, int batchSize = 100_000)
+    {
+        int minId, maxId;
+        await using (var rangeCmd = new NpgsqlCommand(
+            $@"SELECT COALESCE(MIN(""Id""), 0), COALESCE(MAX(""Id""), -1) FROM ""{table}""", conn))
+        {
+            await using var reader = await rangeCmd.ExecuteReaderAsync();
+            await reader.ReadAsync();
+            minId = reader.GetInt32(0);
+            maxId = reader.GetInt32(1);
+        }
+
+        if (minId > maxId) return;
+
+        var total = 0;
+        for (var start = minId; start <= maxId; start += batchSize)
+        {
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.CommandTimeout = 300;
+            cmd.Parameters.AddWithValue("s", start);
+            cmd.Parameters.AddWithValue("e", start + batchSize);
+            total += await cmd.ExecuteNonQueryAsync();
+        }
+
+        if (total > 0) Console.WriteLine($"    Updated {total:N0} rows.");
     }
 
     // ─── User Avatars ─────────────────────────────────────────────────────────
