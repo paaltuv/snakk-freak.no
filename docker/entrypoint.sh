@@ -11,10 +11,10 @@ MARKER_FILE="$CONF_DIR/setup-complete"
 # Ensure storage and runtime directories exist
 mkdir -p "$STORAGE_PATH/avatars/generated" "$STORAGE_PATH/avatars/uploaded" "$CONF_DIR" /app/run
 
-# If setup was previously completed, run DbSeeder for any pending migrations
+# If setup was previously completed, apply any pending migrations
 if [ -f "$CONFIG_FILE" ]; then
-    echo "Setup already complete. Checking for pending migrations..."
-    dotnet /app/dbseeder/Snakk.DbSeeder.dll --skip-seed || {
+    echo "Setup already complete. Applying pending migrations..."
+    dotnet /app/dbseeder/Snakk.DbSeeder.dll --migrations-only || {
         echo "WARNING: DbSeeder failed. Continuing anyway."
     }
 fi
@@ -34,7 +34,7 @@ sleep 2
 CONF="/etc/supervisor/conf.d/snakk.conf"
 
 if [ "$SETUP_WAS_COMPLETE" = true ]; then
-    # Setup already done — start all app services, stop setup wizard
+    # Setup already done â€” start all app services, stop setup wizard
     echo "Starting application services..."
     supervisorctl -c "$CONF" stop setup 2>/dev/null || true
     supervisorctl -c "$CONF" start realtime api public-api web auth admin worker
@@ -48,7 +48,7 @@ else
     echo ""
 
     # Watch for the setup-complete marker (written after config, migrations,
-    # seeding, and JWT generation are all done — not just after config is written)
+    # seeding, and JWT generation are all done â€” not just after config is written)
     (
         while [ ! -f "$MARKER_FILE" ]; do
             sleep 2
@@ -59,7 +59,7 @@ else
         sleep 3  # Let the wizard's HTTP response reach the browser
 
         # Stop setup, start app services, restart gateway to pick up new routing
-        # (DbSeeder was already run by the setup wizard — no need to run it again)
+        # (DbSeeder was already run by the setup wizard â€” no need to run it again)
         supervisorctl -c "$CONF" stop setup
         supervisorctl -c "$CONF" start realtime api public-api web auth admin worker
         supervisorctl -c "$CONF" restart gateway

@@ -28,7 +28,7 @@
     "dev:ts": "tsc --watch --preserveWatchOutput",
     "dev:tailwind": "tailwindcss -i ./Styles/input.css -o ./wwwroot/css/vendor/tailwind.css --watch",
     "dev:tailwind-dark": "tailwindcss -i ./Styles/dark-input.css -o ./wwwroot/css/vendor/dark-theme.css --watch",
-    "dev:sass": "sass Styles/site.scss:wwwroot/css/dist/site.css --watch --no-source-map"
+    "dev:sass": "npm run watch:custom"
   },
   "keywords": [],
   "author": "",

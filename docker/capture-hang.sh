@@ -1,5 +1,5 @@
 #!/bin/bash
-# capture-hang.sh — forensic snapshot during a Snakk hang event.
+# capture-hang.sh â€” forensic snapshot during a Snakk hang event.
 #
 # Run this on the server *while* the frontpage is hanging. It captures
 # everything we need to diagnose the root cause without restarting anything.

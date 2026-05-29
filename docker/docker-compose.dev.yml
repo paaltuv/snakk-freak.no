@@ -1,4 +1,8 @@
 services:
+  postgres:
+    ports:
+      - "5433:5432"
+
   snakk:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
@@ -22,6 +26,7 @@ services:
         npm run build:editor &&
         npm run build:prism &&
         npm run build:charts &&
+        npm run build:custom &&
         npm run dev
       "
 

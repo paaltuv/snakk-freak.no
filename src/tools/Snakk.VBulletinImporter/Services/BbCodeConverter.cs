@@ -126,6 +126,20 @@ public static partial class BbCodeConverter
         // Strip any remaining unrecognized BBCode tags
         text = RemainingBbCodeRegex().Replace(text, "");
 
+        // Convert single line breaks to markdown hard line breaks (two trailing spaces).
+        // Fenced code blocks are protected first so their internal newlines are untouched.
+        var codeBlocks = new Dictionary<string, string>();
+        var codeIdx = 0;
+        text = FencedCodeBlockRegex().Replace(text, m =>
+        {
+            var ph = $"\x01{codeIdx++}\x01";
+            codeBlocks[ph] = m.Value;
+            return ph;
+        });
+        text = SingleNewlineRegex().Replace(text, "  \n");
+        foreach (var (ph, block) in codeBlocks)
+            text = text.Replace(ph, block);
+
         // Collapse excessive blank lines (more than 2 → 2)
         text = ExcessiveNewlinesRegex().Replace(text, "\n\n");
 
@@ -215,4 +229,10 @@ public static partial class BbCodeConverter
 
     [GeneratedRegex(@"\n{3,}")]
     private static partial Regex ExcessiveNewlinesRegex();
+
+    [GeneratedRegex(@"```.*?```", RegexOptions.Singleline)]
+    private static partial Regex FencedCodeBlockRegex();
+
+    [GeneratedRegex(@"(?<!\n)\n(?!\n)")]
+    private static partial Regex SingleNewlineRegex();
 }

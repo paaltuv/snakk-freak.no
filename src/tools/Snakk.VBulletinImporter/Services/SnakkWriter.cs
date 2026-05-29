@@ -3,6 +3,11 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Npgsql;
 using NpgsqlTypes;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Webp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+using Snakk.Application.Services;
 using Snakk.VBulletinImporter.Models;
 
 namespace Snakk.VBulletinImporter.Services;
@@ -94,19 +99,35 @@ public partial class SnakkWriter(string connectionString)
 
     // ─── Community ────────────────────────────────────────────────────────────
 
-    /// <summary>Returns (Id, PublicId) of the created community.</summary>
+    /// <summary>
+    /// Returns (Id, PublicId) for the freakforum community.
+    /// Uses the existing community if setup already created it, otherwise creates it.
+    /// </summary>
     public async Task<(int Id, string PublicId)> WriteCommunityAsync()
     {
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
 
+        // Check if setup already created a community with this slug
+        await using var checkCmd = new NpgsqlCommand(
+            @"SELECT ""Id"", ""PublicId"" FROM ""Community"" WHERE ""Slug"" = 'freakforum' AND NOT ""IsDeleted"" LIMIT 1", conn);
+        await using var checkReader = await checkCmd.ExecuteReaderAsync();
+        if (await checkReader.ReadAsync())
+        {
+            var existingId = checkReader.GetInt32(0);
+            var existingPublicId = checkReader.GetString(1);
+            Console.WriteLine($"  (using existing community from setup)");
+            return (existingId, existingPublicId);
+        }
+        await checkReader.CloseAsync();
+
         var publicId = NewUlid();
         var sql = @"
             INSERT INTO ""Community"" (""PublicId"", ""Slug"", ""Name"", ""Description"", ""CreatedAt"", ""VisibilityId"",
                                        ""ExposeToPlatformFeed"", ""IsAdultOnly"", ""IsRestricted"",
-                                       ""HideAdultDiscussionsFromLists"", ""IsDeleted"", ""AvatarRevision"",
+                                       ""HideAdultDiscussionsFromLists"", ""HasRules"", ""IsDeleted"", ""AvatarRevision"",
                                        ""HubCount"", ""SpaceCount"", ""DiscussionCount"", ""PostCount"", ""ReactionCount"")
-            VALUES (@pid, @slug, @name, @desc, @created, 1, true, false, false, false, false, 0, 0, 0, 0, 0, 0)
+            VALUES (@pid, @slug, @name, @desc, @created, 1, true, false, false, false, false, false, 0, 0, 0, 0, 0, 0)
             RETURNING ""Id""";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -223,20 +244,23 @@ public partial class SnakkWriter(string connectionString)
 
         if (emailUpdates.Count > 0)
         {
-            await ExecuteNonQuery(conn, @"CREATE TEMP TABLE _email_upd (sid INT, email TEXT, hash TEXT) ON COMMIT DROP");
-            await using var emailWriter = await conn.BeginBinaryImportAsync(
-                @"COPY _email_upd (sid, email, hash) FROM STDIN (FORMAT BINARY)");
-            foreach (var u in emailUpdates)
+            await ExecuteNonQuery(conn, @"CREATE TEMP TABLE _email_upd (sid INT, email TEXT, hash TEXT)");
             {
-                var realEmail = u.Email.Trim().ToLowerInvariant();
-                await emailWriter.StartRowAsync();
-                await emailWriter.WriteAsync(mapping[u.UserId], NpgsqlDbType.Integer);
-                await emailWriter.WriteAsync(realEmail, NpgsqlDbType.Text);
-                await emailWriter.WriteAsync(Sha256(realEmail), NpgsqlDbType.Text);
-            }
-            await emailWriter.CompleteAsync();
+                await using var emailWriter = await conn.BeginBinaryImportAsync(
+                    @"COPY _email_upd (sid, email, hash) FROM STDIN (FORMAT BINARY)");
+                foreach (var u in emailUpdates)
+                {
+                    var realEmail = u.Email.Trim().ToLowerInvariant();
+                    await emailWriter.StartRowAsync();
+                    await emailWriter.WriteAsync(mapping[u.UserId], NpgsqlDbType.Integer);
+                    await emailWriter.WriteAsync(realEmail, NpgsqlDbType.Text);
+                    await emailWriter.WriteAsync(Sha256(realEmail), NpgsqlDbType.Text);
+                }
+                await emailWriter.CompleteAsync();
+            } // dispose exits COPY state before running UPDATE
             await ExecuteNonQuery(conn, @"UPDATE ""User"" u SET ""Email"" = t.email, ""EmailHash"" = t.hash
                 FROM _email_upd t WHERE u.""Id"" = t.sid");
+            await ExecuteNonQuery(conn, @"DROP TABLE _email_upd");
         }
 
         return mapping;
@@ -310,11 +334,16 @@ public partial class SnakkWriter(string connectionString)
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
 
-        var sql = @"INSERT INTO ""Hub"" (""PublicId"", ""Slug"", ""CommunityId"", ""Name"", ""Description"", ""CreatedAt"",
+        var communityPublicId = (string)(await new NpgsqlCommand(
+            @"SELECT ""PublicId"" FROM ""Community"" WHERE ""Id"" = @id", conn)
+            { Parameters = { new("id", communityId) } }
+            .ExecuteScalarAsync())!;
+
+        var sql = @"INSERT INTO ""Hub"" (""PublicId"", ""Slug"", ""CommunityId"", ""CommunityPublicId"", ""Name"", ""Description"", ""CreatedAt"",
                                          ""AllowAnonymousReading"", ""RequireEmailConfirmation"", ""IsRestricted"",
-                                         ""IsAdultOnly"", ""IsDeleted"", ""AvatarRevision"",
+                                         ""IsAdultOnly"", ""HasRules"", ""ParentCommunityHasRules"", ""IsDeleted"", ""AvatarRevision"",
                                          ""SpaceCount"", ""DiscussionCount"", ""PostCount"", ""ReactionCount"")
-                    VALUES (@pid, @slug, @cid, @name, @desc, @created, true, false, false, false, false, 0, 0, 0, 0, 0)
+                    VALUES (@pid, @slug, @cid, @cpid, @name, @desc, @created, true, false, false, false, false, false, false, 0, 0, 0, 0, 0)
                     RETURNING ""Id""";
 
         foreach (var cat in categories)
@@ -324,6 +353,7 @@ public partial class SnakkWriter(string connectionString)
             cmd.Parameters.AddWithValue("pid", NewUlid());
             cmd.Parameters.AddWithValue("slug", slug);
             cmd.Parameters.AddWithValue("cid", communityId);
+            cmd.Parameters.AddWithValue("cpid", communityPublicId);
             cmd.Parameters.AddWithValue("name", cat.Title);
             cmd.Parameters.AddWithValue("desc", (object?)cat.Description ?? DBNull.Value);
             cmd.Parameters.AddWithValue("created", DateTime.UtcNow);
@@ -367,12 +397,32 @@ public partial class SnakkWriter(string connectionString)
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
 
+        var hubIds = hubMapping.Values.Distinct().ToArray();
+        var hubBreadcrumbs = new Dictionary<int, (string HubPublicId, string HubSlug, string HubName, string CommunityPublicId, string CommunitySlug, string CommunityName)>();
+        await using (var bcCmd = new NpgsqlCommand(@"SELECT h.""Id"", h.""PublicId"", h.""Slug"", h.""Name"",
+                                                            c.""PublicId"" AS ""CommunityPublicId"", c.""Slug"" AS ""CommunitySlug"", c.""Name"" AS ""CommunityName""
+                                                     FROM ""Hub"" h JOIN ""Community"" c ON c.""Id"" = h.""CommunityId""
+                                                     WHERE h.""Id"" = ANY(@ids)", conn))
+        {
+            bcCmd.Parameters.AddWithValue("ids", hubIds);
+            await using var bcReader = await bcCmd.ExecuteReaderAsync();
+            while (await bcReader.ReadAsync())
+                hubBreadcrumbs[(int)bcReader["Id"]] = (
+                    (string)bcReader["PublicId"], (string)bcReader["Slug"], (string)bcReader["Name"],
+                    (string)bcReader["CommunityPublicId"], (string)bcReader["CommunitySlug"], (string)bcReader["CommunityName"]);
+        }
+
         var sql = @"INSERT INTO ""Space"" (""PublicId"", ""Slug"", ""HubId"", ""Name"", ""Description"", ""CreatedAt"",
                                            ""AllowAnonymousReading"", ""RequireEmailConfirmation"", ""IsRestricted"",
-                                           ""IsAdultOnly"", ""AllowsAdultContent"", ""AutoParagraphEnabled"",
+                                           ""IsAdultOnly"", ""AllowsAdultContent"", ""CommunityHideAdultDiscussionsFromLists"", ""AutoParagraphEnabled"",
+                                           ""HasRules"", ""ParentHubHasRules"", ""ParentCommunityHasRules"",
                                            ""IsDeleted"", ""AvatarRevision"",
+                                           ""HubPublicId"", ""HubSlug"", ""HubName"",
+                                           ""CommunityPublicId"", ""CommunitySlug"", ""CommunityName"",
                                            ""DiscussionCount"", ""PostCount"", ""ReactionCount"", ""FollowerCount"")
-                    VALUES (@pid, @slug, @hid, @name, @desc, @created, true, false, @restricted, false, false, true, false, 0, 0, 0, 0, 0)
+                    VALUES (@pid, @slug, @hid, @name, @desc, @created, true, false, @restricted, false, false, false, true, false, false, false, false, 0,
+                            @hubPublicId, @hubSlug, @hubName, @communityPublicId, @communitySlug, @communityName,
+                            0, 0, 0, 0)
                     RETURNING ""Id""";
 
         foreach (var forum in allForums)
@@ -381,6 +431,11 @@ public partial class SnakkWriter(string connectionString)
             if (!forumToHub.TryGetValue(forum.ForumId, out var hubId))
             {
                 Console.WriteLine($"  WARN: Forum '{forum.Title}' (id={forum.ForumId}) could not be resolved to a hub. Skipping.");
+                continue;
+            }
+            if (!hubBreadcrumbs.TryGetValue(hubId, out var bc))
+            {
+                Console.WriteLine($"  WARN: Forum '{forum.Title}' (id={forum.ForumId}) — no breadcrumb data for hub {hubId}. Skipping.");
                 continue;
             }
 
@@ -393,6 +448,12 @@ public partial class SnakkWriter(string connectionString)
             cmd.Parameters.AddWithValue("desc", (object?)forum.Description ?? DBNull.Value);
             cmd.Parameters.AddWithValue("created", DateTime.UtcNow);
             cmd.Parameters.AddWithValue("restricted", !forum.IsPublic);
+            cmd.Parameters.AddWithValue("hubPublicId", bc.HubPublicId);
+            cmd.Parameters.AddWithValue("hubSlug", bc.HubSlug);
+            cmd.Parameters.AddWithValue("hubName", bc.HubName);
+            cmd.Parameters.AddWithValue("communityPublicId", bc.CommunityPublicId);
+            cmd.Parameters.AddWithValue("communitySlug", bc.CommunitySlug);
+            cmd.Parameters.AddWithValue("communityName", bc.CommunityName);
 
             var spaceId = (int)(await cmd.ExecuteScalarAsync())!;
             vbToSnakk[forum.ForumId] = spaceId;
@@ -614,6 +675,9 @@ public partial class SnakkWriter(string connectionString)
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
 
+        var markupParser = new MarkupParser();
+        var contentNormalizer = new ContentNormalizer();
+
         {
             var copySql = @"COPY ""Post"" (""PublicId"", ""Content"", ""RenderedContent"", ""CreatedAt"",
                                            ""IsDeleted"", ""DeletedAt"", ""EditedAt"",
@@ -630,12 +694,17 @@ public partial class SnakkWriter(string connectionString)
                 var created = FromUnix(p.DateLine);
                 var isDeleted = p.Visible != 1;
                 var isFirst = firstPostIds.Contains(p.PostId);
-                var content = BbCodeConverter.Convert(p.PageText);
+
+                var normalized = contentNormalizer.NormalizeBody(BbCodeConverter.Convert(p.PageText));
+                var content = normalized.Content;
+                var renderedContent = markupParser.ToHtml(content, autoParagraph: true, imageData: null);
+                var plainText = markupParser.ToPlainText(content);
+                var excerpt = plainText.Length > 200 ? plainText[..200] : plainText;
 
                 await writer.StartRowAsync();
                 await writer.WriteAsync(publicId, NpgsqlDbType.Text);
                 await writer.WriteAsync(content, NpgsqlDbType.Text);
-                await writer.WriteAsync(content, NpgsqlDbType.Text);
+                await writer.WriteAsync(renderedContent, NpgsqlDbType.Text);
                 await writer.WriteAsync(created, NpgsqlDbType.TimestampTz);
                 await writer.WriteAsync(isDeleted, NpgsqlDbType.Boolean);
                 if (isDeleted) await writer.WriteAsync(created, NpgsqlDbType.TimestampTz);
@@ -643,7 +712,7 @@ public partial class SnakkWriter(string connectionString)
                 if (p.LastEdit > 0) await writer.WriteAsync(FromUnix(p.LastEdit), NpgsqlDbType.TimestampTz);
                 else await writer.WriteNullAsync();
                 await writer.WriteAsync(isFirst, NpgsqlDbType.Boolean);
-                await writer.WriteAsync(false, NpgsqlDbType.Boolean);
+                await writer.WriteAsync(content.Contains('`'), NpgsqlDbType.Boolean);
                 await writer.WriteAsync(0, NpgsqlDbType.Integer);
                 await writer.WriteAsync(0, NpgsqlDbType.Integer);
                 await writer.WriteAsync(false, NpgsqlDbType.Boolean);
@@ -651,14 +720,13 @@ public partial class SnakkWriter(string connectionString)
                 await writer.WriteAsync(isFirst, NpgsqlDbType.Boolean);
                 await writer.WriteAsync(false, NpgsqlDbType.Boolean);
                 await writer.WriteAsync(false, NpgsqlDbType.Boolean);
-                await writer.WriteAsync(false, NpgsqlDbType.Boolean);
+                await writer.WriteAsync(normalized.WasNormalized, NpgsqlDbType.Boolean);
                 await writer.WriteAsync(discussionId, NpgsqlDbType.Integer);
                 await writer.WriteAsync(spaceId, NpgsqlDbType.Integer);
                 await writer.WriteAsync(hubId, NpgsqlDbType.Integer);
                 await writer.WriteAsync(communityId, NpgsqlDbType.Integer);
                 await writer.WriteAsync(userId, NpgsqlDbType.Integer);
-                var excerpt = BuildExcerpt(content);
-                if (excerpt != null) await writer.WriteAsync(excerpt, NpgsqlDbType.Text);
+                if (!string.IsNullOrEmpty(excerpt)) await writer.WriteAsync(excerpt, NpgsqlDbType.Text);
                 else await writer.WriteNullAsync();
             }
 
@@ -813,6 +881,58 @@ public partial class SnakkWriter(string connectionString)
             FROM (SELECT ""DiscussionId"", COUNT(*) cnt FROM ""Follow"" WHERE ""TargetTypeId"" = 1 GROUP BY ""DiscussionId"") sub
             WHERE d.""Id"" = sub.""DiscussionId""");
 
+        Console.WriteLine("  Discussion last-post snapshot...");
+        await ExecuteNonQuery(conn, @"
+            WITH last_posts AS (
+                SELECT DISTINCT ON (""DiscussionId"")
+                    ""DiscussionId"",
+                    ""PlainTextExcerpt"",
+                    ""CreatedByUserId""
+                FROM ""Post""
+                WHERE NOT ""IsDeleted""
+                ORDER BY ""DiscussionId"", ""CreatedAt"" DESC
+            )
+            UPDATE ""Discussion"" d
+            SET ""LastPostAuthorPublicId""                = u.""PublicId"",
+                ""LastPostAuthorDisplayName""             = u.""DisplayName"",
+                ""LastPostAuthorAvatarFileName""          = u.""AvatarFileName"",
+                ""LastPostAuthorAvatarThumbnailFileName"" = u.""AvatarThumbnailFileName"",
+                ""LastPostPlainTextExcerpt""              = lp.""PlainTextExcerpt""
+            FROM last_posts lp
+            JOIN ""User"" u ON u.""Id"" = lp.""CreatedByUserId""
+            WHERE d.""Id"" = lp.""DiscussionId""");
+
+        Console.WriteLine("  Discussion breadcrumb + author fields...");
+        await ExecuteNonQuery(conn, @"
+            UPDATE ""Discussion"" d
+            SET ""SpacePublicId""                 = s.""PublicId"",
+                ""HubPublicId""                   = h.""PublicId"",
+                ""CommunityPublicId""             = c.""PublicId"",
+                ""CreatedByUserPublicId""          = u.""PublicId"",
+                ""AuthorDisplayName""             = u.""DisplayName"",
+                ""AuthorAvatarFileName""          = u.""AvatarFileName"",
+                ""AuthorAvatarThumbnailFileName"" = u.""AvatarThumbnailFileName""
+            FROM ""Space"" s, ""Hub"" h, ""Community"" c, ""User"" u
+            WHERE d.""SpaceId"" = s.""Id""
+              AND s.""HubId"" = h.""Id""
+              AND h.""CommunityId"" = c.""Id""
+              AND d.""CreatedByUserId"" = u.""Id""");
+
+        Console.WriteLine("  Post breadcrumb PublicId fields...");
+        await ExecuteNonQuery(conn, @"
+            UPDATE ""Post"" p
+            SET ""DiscussionPublicId""       = d.""PublicId"",
+                ""SpacePublicId""            = s.""PublicId"",
+                ""HubPublicId""              = h.""PublicId"",
+                ""CommunityPublicId""        = c.""PublicId"",
+                ""CreatedByUserPublicId""    = u.""PublicId""
+            FROM ""Discussion"" d, ""Space"" s, ""Hub"" h, ""Community"" c, ""User"" u
+            WHERE p.""DiscussionId"" = d.""Id""
+              AND d.""SpaceId"" = s.""Id""
+              AND s.""HubId"" = h.""Id""
+              AND h.""CommunityId"" = c.""Id""
+              AND p.""CreatedByUserId"" = u.""Id""");
+
         Console.WriteLine("  Space counts...");
         await ExecuteNonQuery(conn, @"UPDATE ""Space"" s SET ""DiscussionCount"" = COALESCE(sub.cnt, 0)
             FROM (SELECT ""SpaceId"", COUNT(*) cnt FROM ""Discussion"" WHERE NOT ""IsDeleted"" GROUP BY ""SpaceId"") sub
@@ -855,6 +975,72 @@ public partial class SnakkWriter(string connectionString)
             FROM (SELECT ""FollowedUserId"", COUNT(*) cnt FROM ""Follow"" WHERE ""TargetTypeId"" = 3 GROUP BY ""FollowedUserId"") sub
             WHERE u.""Id"" = sub.""FollowedUserId""");
 
+        Console.WriteLine("  ActivityDailySnapshot — Space level...");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(p.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 3, p.""SpaceId"", COUNT(*), 0
+            FROM ""Post"" p WHERE NOT p.""IsDeleted""
+            GROUP BY 1, 3
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""PostCount"" = EXCLUDED.""PostCount""");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(d.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 3, d.""SpaceId"", 0, COUNT(*)
+            FROM ""Discussion"" d WHERE NOT d.""IsDeleted""
+            GROUP BY 1, 3
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""DiscussionCount"" = EXCLUDED.""DiscussionCount""");
+
+        Console.WriteLine("  ActivityDailySnapshot — Hub level...");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(p.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 2, d.""HubId"", COUNT(*), 0
+            FROM ""Post"" p JOIN ""Discussion"" d ON d.""Id"" = p.""DiscussionId""
+            WHERE NOT p.""IsDeleted""
+            GROUP BY 1, 3
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""PostCount"" = EXCLUDED.""PostCount""");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(d.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 2, d.""HubId"", 0, COUNT(*)
+            FROM ""Discussion"" d WHERE NOT d.""IsDeleted""
+            GROUP BY 1, 3
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""DiscussionCount"" = EXCLUDED.""DiscussionCount""");
+
+        Console.WriteLine("  ActivityDailySnapshot — Community level...");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(p.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 1, d.""CommunityId"", COUNT(*), 0
+            FROM ""Post"" p JOIN ""Discussion"" d ON d.""Id"" = p.""DiscussionId""
+            WHERE NOT p.""IsDeleted""
+            GROUP BY 1, 3
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""PostCount"" = EXCLUDED.""PostCount""");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(d.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 1, d.""CommunityId"", 0, COUNT(*)
+            FROM ""Discussion"" d WHERE NOT d.""IsDeleted""
+            GROUP BY 1, 3
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""DiscussionCount"" = EXCLUDED.""DiscussionCount""");
+
+        Console.WriteLine("  ActivityDailySnapshot — Platform level...");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(p.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 0, 0, COUNT(*), 0
+            FROM ""Post"" p WHERE NOT p.""IsDeleted""
+            GROUP BY 1
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""PostCount"" = EXCLUDED.""PostCount""");
+        await ExecuteNonQuery(conn, @"
+            INSERT INTO ""ActivityDailySnapshot"" (""Date"", ""EntityType"", ""EntityId"", ""PostCount"", ""DiscussionCount"")
+            SELECT CAST(d.""CreatedAt"" AT TIME ZONE 'UTC' AS date), 0, 0, 0, COUNT(*)
+            FROM ""Discussion"" d WHERE NOT d.""IsDeleted""
+            GROUP BY 1
+            ON CONFLICT (""Date"", ""EntityType"", ""EntityId"")
+            DO UPDATE SET ""DiscussionCount"" = EXCLUDED.""DiscussionCount""");
+
         Console.WriteLine("  Denormalized counts updated.");
     }
 
@@ -866,4 +1052,97 @@ public partial class SnakkWriter(string connectionString)
         cmd.CommandTimeout = 900;
         await cmd.ExecuteNonQueryAsync();
     }
+
+    // ─── User Avatars ─────────────────────────────────────────────────────────
+
+    public async Task<int> WriteUserAvatarsAsync(string avatarInputDir, string storageBasePath)
+    {
+        // Build vbUserId → (SnakkId, PublicId) from placeholder email pattern
+        await using var conn = new NpgsqlConnection(connectionString);
+        await conn.OpenAsync();
+
+        var idMap = new Dictionary<int, (int SnakkId, string PublicId)>();
+        await using (var mapCmd = new NpgsqlCommand(
+            @"SELECT ""Id"", ""PublicId"", ""Email"" FROM ""User"" WHERE ""Email"" LIKE '%@imported.freakforum.nu'", conn))
+        await using (var mapReader = await mapCmd.ExecuteReaderAsync())
+        {
+            while (await mapReader.ReadAsync())
+            {
+                var email = mapReader.GetString(2);
+                var atIdx = email.IndexOf('@');
+                if (atIdx > 0 && int.TryParse(email[..atIdx], out var vbId))
+                    idMap[vbId] = (mapReader.GetInt32(0), mapReader.GetString(1));
+            }
+        }
+
+        var uploadedDir = Path.Combine(storageBasePath, "avatars", "uploaded");
+        Directory.CreateDirectory(uploadedDir);
+
+        // Parse all avatar files and pick the highest revision per user
+        var candidates = Directory.GetFiles(avatarInputDir)
+            .Select(path =>
+            {
+                var m = AvatarFileNameRegex().Match(Path.GetFileName(path));
+                if (!m.Success) return (Valid: false, Path: path, UserId: 0, Revision: 0);
+                return (Valid: true, Path: path,
+                    UserId: int.Parse(m.Groups[1].Value),
+                    Revision: int.Parse(m.Groups[2].Value));
+            })
+            .Where(x => x.Valid && idMap.ContainsKey(x.UserId))
+            .GroupBy(x => x.UserId)
+            .Select(g => g.OrderByDescending(x => x.Revision).First())
+            .ToList();
+
+        Console.WriteLine($"  Found {candidates.Count} avatars to process");
+
+        var count = 0;
+        foreach (var candidate in candidates)
+        {
+            var (snakkId, publicId) = idMap[candidate.UserId];
+            try
+            {
+                using var sourceImage = await Image.LoadAsync<Rgba32>(candidate.Path);
+                using var workImage = sourceImage.Frames.CloneFrame(0);
+
+                if (workImage.Width > 256 || workImage.Height > 256)
+                    workImage.Mutate(x => x.Resize(new ResizeOptions { Size = new Size(256, 256), Mode = ResizeMode.Max }));
+
+                // Full (256×256 max)
+                await using (var fs = new FileStream(Path.Combine(uploadedDir, $"{publicId}_r1.webp"), FileMode.Create, FileAccess.Write))
+                    await workImage.SaveAsWebpAsync(fs, new WebpEncoder { Quality = 80 });
+
+                // Thumb (80×80)
+                using var thumbImage = workImage.Clone(x => x.Resize(new ResizeOptions { Size = new Size(80, 80), Mode = ResizeMode.Max }));
+                await using (var fs = new FileStream(Path.Combine(uploadedDir, $"{publicId}_r1_thumb.webp"), FileMode.Create, FileAccess.Write))
+                    await thumbImage.SaveAsWebpAsync(fs, new WebpEncoder { Quality = 75 });
+
+                // Micro (26×26)
+                using var microImage = workImage.Clone(x => x.Resize(new ResizeOptions { Size = new Size(26, 26), Mode = ResizeMode.Max }));
+                await using (var fs = new FileStream(Path.Combine(uploadedDir, $"{publicId}_r1_micro.webp"), FileMode.Create, FileAccess.Write))
+                    await microImage.SaveAsWebpAsync(fs, new WebpEncoder { Quality = 70 });
+
+                // Update user record
+                await using var updateCmd = new NpgsqlCommand(
+                    @"UPDATE ""User"" SET ""AvatarFileName"" = @fn, ""AvatarThumbnailFileName"" = @tfn, ""AvatarMicroFileName"" = @mfn, ""AvatarRevision"" = 1 WHERE ""Id"" = @id",
+                    conn);
+                updateCmd.Parameters.AddWithValue("fn", $"{publicId}_r1.webp");
+                updateCmd.Parameters.AddWithValue("tfn", $"{publicId}_r1_thumb.webp");
+                updateCmd.Parameters.AddWithValue("mfn", $"{publicId}_r1_micro.webp");
+                updateCmd.Parameters.AddWithValue("id", snakkId);
+                await updateCmd.ExecuteNonQueryAsync();
+
+                count++;
+                Console.Write($"\r  Progress: {count}/{candidates.Count}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n  WARN: Skipping avatar for vb user {candidate.UserId}: {ex.Message}");
+            }
+        }
+
+        return count;
+    }
+
+    [GeneratedRegex(@"^avatar(\d+)_(\d+)\.(gif|jpg|jpeg|png|webp)$", RegexOptions.IgnoreCase)]
+    private static partial Regex AvatarFileNameRegex();
 }
