@@ -10,6 +10,8 @@ public class User
     public string? DisplayName { get; private set; }
     public string? Email { get; private set; }
     public string? PasswordHash { get; private set; }
+    public string? LegacyPasswordHash { get; private set; }
+    public string? LegacyPasswordSalt { get; private set; }
     public bool EmailVerified { get; private set; }
     public string? EmailVerificationToken { get; private set; }
     public DateTime? EmailVerificationTokenCreatedAt { get; private set; }
@@ -82,7 +84,9 @@ public class User
         bool hidePresence = false,
         DateTime? emailVerificationTokenCreatedAt = null,
         long authVersion = 1,
-        DateTime? authVersionUpdatedAt = null)
+        DateTime? authVersionUpdatedAt = null,
+        string? legacyPasswordHash = null,
+        string? legacyPasswordSalt = null)
     {
         PublicId = publicId;
         DisplayName = displayName;
@@ -117,6 +121,8 @@ public class User
         LastLoginAt = lastLoginAt;
         AuthVersion = authVersion;
         AuthVersionUpdatedAt = authVersionUpdatedAt ?? DateTime.UtcNow;
+        LegacyPasswordHash = legacyPasswordHash;
+        LegacyPasswordSalt = legacyPasswordSalt;
     }
 
     public static User CreateWithEmail(
@@ -243,7 +249,9 @@ public class User
         bool hidePresence = false,
         DateTime? emailVerificationTokenCreatedAt = null,
         long authVersion = 1,
-        DateTime? authVersionUpdatedAt = null) =>
+        DateTime? authVersionUpdatedAt = null,
+        string? legacyPasswordHash = null,
+        string? legacyPasswordSalt = null) =>
         new User(
             publicId,
             displayName,
@@ -277,7 +285,9 @@ public class User
             hidePresence,
             emailVerificationTokenCreatedAt,
             authVersion,
-            authVersionUpdatedAt);
+            authVersionUpdatedAt,
+            legacyPasswordHash,
+            legacyPasswordSalt);
 
     public void UpdateDisplayName(string displayName)
     {
@@ -373,6 +383,20 @@ public class User
 
     public bool HasPassword() =>
         !string.IsNullOrEmpty(PasswordHash);
+
+    public bool HasLegacyPassword() =>
+        !string.IsNullOrEmpty(LegacyPasswordHash) && !string.IsNullOrEmpty(LegacyPasswordSalt);
+
+    /// <summary>
+    /// Called on first successful vBulletin legacy login. Upgrades to bcrypt and clears MD5 fields.
+    /// </summary>
+    public void UpgradeFromLegacyPassword(string newBcryptHash)
+    {
+        PasswordHash = newBcryptHash;
+        LegacyPasswordHash = null;
+        LegacyPasswordSalt = null;
+        LastModifiedAt = DateTime.UtcNow;
+    }
 
     public void SetAvatarFileName(string? fileName, string? thumbnailFileName = null, string? microFileName = null)
     {

@@ -71,6 +71,10 @@ public class UserDatabaseEntity
     public string? TwoFactorSecret { get; set; } // Base32-encoded TOTP secret
     public DateTime? TwoFactorEnabledAt { get; set; }
 
+    // Legacy password migration (populated by vBulletin importer, cleared on first successful login)
+    public string? LegacyPasswordHash { get; set; }
+    public string? LegacyPasswordSalt { get; set; }
+
     // Discord account linking (separate from OAuthProvider/OAuthProviderId which controls login)
     public string? DiscordUserId { get; set; }
     public string? DiscordUsername { get; set; }

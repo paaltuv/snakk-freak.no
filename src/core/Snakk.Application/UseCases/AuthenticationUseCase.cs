@@ -11,6 +11,7 @@ using Snakk.Shared;
 using Snakk.Shared.Enums;
 using Snakk.Shared.Models;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 
 public class AuthenticationUseCase(
@@ -29,6 +30,16 @@ public class AuthenticationUseCase(
 {
     // Dummy BCrypt hash for timing equalization (prevents email enumeration)
     private static readonly string DummyPasswordHash = "$2a$12$LJ3m4ys3Gy2e1mGFBgHnMeZOp5xDz4MBpUmLhMYkP5K8xA2YUCIi";
+
+    // vBulletin password scheme: MD5(MD5(plaintext) + salt)
+    private static bool VerifyLegacyMd5Password(string plaintext, string storedHash, string salt)
+    {
+        var inner = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(plaintext))).ToLower();
+        var outer = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(inner + salt))).ToLower();
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(outer),
+            Encoding.UTF8.GetBytes(storedHash.ToLower()));
+    }
 
     public async Task<Result<User>> RegisterWithEmailAsync(
         string email,
@@ -126,6 +137,16 @@ public class AuthenticationUseCase(
         // Verify password BEFORE checking lockout — equalizes timing so a locked-out
         // account doesn't return faster than one with a wrong password (timing oracle).
         var passwordValid = user.HasPassword() && passwordHasher.VerifyPassword(password, user.PasswordHash!);
+
+        // Legacy vBulletin MD5 fallback: MD5(MD5(plaintext) + salt)
+        if (!passwordValid && user.HasLegacyPassword())
+        {
+            if (VerifyLegacyMd5Password(password, user.LegacyPasswordHash!, user.LegacyPasswordSalt!))
+            {
+                user.UpgradeFromLegacyPassword(passwordHasher.HashPassword(password));
+                passwordValid = true;
+            }
+        }
 
         if (user.IsLockedOut)
             return Result<User>.Failure("Account is temporarily locked due to too many failed login attempts. Please try again later.");

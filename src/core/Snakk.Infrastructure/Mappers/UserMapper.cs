@@ -51,7 +51,9 @@ public static class UserMapper
             hidePresence: entity.HidePresence,
             emailVerificationTokenCreatedAt: entity.EmailVerificationTokenCreatedAt,
             authVersion: entity.AuthVersion,
-            authVersionUpdatedAt: entity.AuthVersionUpdatedAt);
+            authVersionUpdatedAt: entity.AuthVersionUpdatedAt,
+            legacyPasswordHash: entity.LegacyPasswordHash,
+            legacyPasswordSalt: entity.LegacyPasswordSalt);
     }
 
     public static UserDatabaseEntity ToPersistence(this User user) =>
@@ -88,6 +90,8 @@ public static class UserMapper
             FailedLoginAttempts = user.FailedLoginAttempts,
             LockoutEnd = user.LockoutEnd,
             AuthVersion = user.AuthVersion,
-            AuthVersionUpdatedAt = user.AuthVersionUpdatedAt
+            AuthVersionUpdatedAt = user.AuthVersionUpdatedAt,
+            LegacyPasswordHash = user.LegacyPasswordHash,
+            LegacyPasswordSalt = user.LegacyPasswordSalt
         };
 }
