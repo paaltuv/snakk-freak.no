@@ -6,6 +6,7 @@ services:
   snakk:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
+      Snakk__DefaultCommunitySlug: freakforum
     volumes:
       - ../src/apps/Snakk.Web/wwwroot:/app/web/wwwroot
 

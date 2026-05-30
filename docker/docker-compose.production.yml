@@ -62,6 +62,7 @@ services:
       DB_PORT: "5432"
       ConnectionStrings__DbConnection: "Host=postgres;Port=5432;Database=snakk;Username=snakk;Password=${POSTGRES_PASSWORD}"
       Gateway__DisableHealthChecks: "true"
+      Snakk__DefaultCommunitySlug: freakforum
 
 volumes:
   pgdata:
