@@ -163,6 +163,16 @@ public class SnakkApiClient(
         catch (RpcException ex) { LogGrpcError(ex); return null; }
     }
 
+    public virtual async Task<ListSpacesByCommunityResponse?> GetSpacesByCommunityAsync(string communityId, CancellationToken ct = default)
+    {
+        try
+        {
+            return await spaceClient.ListSpacesByCommunityAsync(
+                new ListSpacesByCommunityRequest { CommunityId = communityId }, cancellationToken: ct);
+        }
+        catch (RpcException ex) { LogGrpcError(ex); return null; }
+    }
+
     public virtual async Task<SearchSpacesResponse?> SearchSpacesAsync(
         string? query = null, string? hubId = null, string? communityId = null, int limit = 10, CancellationToken ct = default)
     {

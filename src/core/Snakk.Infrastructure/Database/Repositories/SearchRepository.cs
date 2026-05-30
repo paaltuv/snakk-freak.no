@@ -503,6 +503,63 @@ public class SearchRepository(SnakkDbContext context, IUserGrantsCacheService gr
         };
     }
 
+    public async Task<List<SpaceListItemDto>> GetSpacesByCommunityAsync(
+        string communityPublicId,
+        string? userId = null,
+        CancellationToken ct = default)
+    {
+        var baseQuery = _context.Spaces
+            .Where(s => s.Hub.CommunityPublicId == communityPublicId);
+        baseQuery = await WithSpaceAccessFilterAsync(baseQuery, userId, ct);
+
+        var spaces = await baseQuery
+            .OrderBy(s => s.Hub.Name)
+            .ThenBy(s => s.Name)
+            .Select(s => new {
+                s.Id,
+                s.PublicId,
+                HubPublicId = s.HubPublicId,
+                s.Name,
+                s.Slug,
+                s.Description,
+                s.CreatedAt,
+                s.DiscussionCount,
+                ReplyCount = s.PostCount - s.DiscussionCount,
+                s.AvatarFileName,
+            })
+            .ToListAsync(ct);
+
+        var latestBySpace = await GetLatestDiscussionPerSpaceAsync(
+            spaces.Select(s => s.Id).ToArray(), ct);
+
+        return spaces
+            .Select(s => {
+                latestBySpace.TryGetValue(s.Id, out var ld);
+                return new SpaceListItemDto(
+                    s.PublicId,
+                    s.HubPublicId,
+                    s.Name,
+                    s.Slug,
+                    s.Description,
+                    s.CreatedAt,
+                    s.DiscussionCount,
+                    s.ReplyCount,
+                    ld is not null
+                        ? new LatestDiscussionDto(
+                            ld.PublicId,
+                            ld.Title,
+                            ld.Slug,
+                            ld.LastActivityAt,
+                            ld.AuthorPublicId,
+                            ld.AuthorDisplayName ?? "",
+                            ld.AuthorAvatarFileName,
+                            ld.PostCount)
+                        : null,
+                    s.AvatarFileName);
+            })
+            .ToList();
+    }
+
     private async Task<IQueryable<HubDatabaseEntity>> WithHubAccessFilterAsync(
         IQueryable<HubDatabaseEntity> query, string? userId, CancellationToken ct = default)
     {

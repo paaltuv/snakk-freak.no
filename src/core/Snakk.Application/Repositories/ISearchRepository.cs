@@ -62,6 +62,15 @@ public interface ISearchRepository
         CancellationToken ct = default);
 
     /// <summary>
+    /// Gets all spaces across all hubs in a community in a single query.
+    /// Ordered by hub name then space name.
+    /// </summary>
+    Task<List<SpaceListItemDto>> GetSpacesByCommunityAsync(
+        string communityPublicId,
+        string? userId = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Searches spaces by name, optionally scoped to a hub or community,
     /// sorted by discussion count descending.
     /// </summary>

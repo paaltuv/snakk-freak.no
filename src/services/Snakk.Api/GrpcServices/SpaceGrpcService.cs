@@ -118,6 +118,52 @@ public class SpaceGrpcService(
         return response;
     }
 
+    public override async Task<ListSpacesByCommunityResponse> ListSpacesByCommunity(ListSpacesByCommunityRequest request, ServerCallContext context)
+    {
+        var ct = context.CancellationToken;
+        var userId = currentUser.GetCurrentUserId();
+        var items = await searchRepository.GetSpacesByCommunityAsync(request.CommunityId, userId, ct);
+
+        var response = new ListSpacesByCommunityResponse();
+        foreach (var s in items)
+        {
+            var spaceInfo = new SpaceByHubInfo
+            {
+                PublicId = s.PublicId,
+                HubPublicId = s.HubPublicId,
+                Name = s.Name,
+                Slug = s.Slug,
+                Description = s.Description ?? "",
+                DiscussionCount = s.DiscussionCount,
+                ReplyCount = s.ReplyCount,
+                CreatedAt = Timestamp.FromDateTime(DateTime.SpecifyKind(s.CreatedAt, DateTimeKind.Utc))
+            };
+
+            if (s.AvatarFileName is not null)
+                spaceInfo.AvatarFileName = s.AvatarFileName;
+
+            if (s.LatestDiscussion is not null)
+            {
+                var ld = s.LatestDiscussion;
+                spaceInfo.LatestDiscussion = new LatestDiscussionRef
+                {
+                    PublicId = ld.PublicId,
+                    Title = ld.Title,
+                    Slug = ld.Slug,
+                    LastActivityAt = Timestamp.FromDateTime(DateTime.SpecifyKind(ld.LastActivityAt, DateTimeKind.Utc)),
+                    AuthorPublicId = ld.AuthorPublicId,
+                    AuthorDisplayName = ld.AuthorDisplayName,
+                    AuthorAvatarFileName = ld.AuthorAvatarFileName ?? "",
+                    PostCount = ld.PostCount
+                };
+            }
+
+            response.Items.Add(spaceInfo);
+        }
+
+        return response;
+    }
+
     public override async Task<SearchSpacesResponse> SearchSpaces(SearchSpacesRequest request, ServerCallContext context)
     {
         var ct = context.CancellationToken;

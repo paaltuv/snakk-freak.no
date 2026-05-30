@@ -87,14 +87,19 @@ public class DetailModel(
         if (stats is not null)
             InlineCommunityStats = new(stats.SpaceCount, stats.DiscussionCount, stats.ReplyCount, "fresh");
 
-        // Fetch spaces for all hubs in parallel (each gRPC call has its own DbContext scope)
-        if (Hubs?.Items != null)
+        // Fetch all spaces for the community in a single batched gRPC call, then group by hub in memory
+        if (Hubs?.Items is { Count: > 0 })
         {
-            var spaceTasks = Hubs.Items.Select(async hub =>
-                (hub.PublicId, spaces: await _apiClient.GetSpacesByHubAsync(hub.PublicId, 0, 50)));
-            foreach (var (hubPublicId, spaces) in await Task.WhenAll(spaceTasks))
-                if (spaces != null)
-                    SpacesByHub[hubPublicId] = spaces;
+            var allSpaces = await _apiClient.GetSpacesByCommunityAsync(CommunityDetail.PublicId, cancellationToken);
+            if (allSpaces != null)
+            {
+                foreach (var group in allSpaces.Items.GroupBy(s => s.HubPublicId))
+                {
+                    var paged = new PagedSpaceByHubList { PageSize = group.Count() };
+                    paged.Items.AddRange(group);
+                    SpacesByHub[group.Key] = paged;
+                }
+            }
         }
 
         // Fetch sparklines for all spaces in a single batch gRPC call (2 DB queries total)
